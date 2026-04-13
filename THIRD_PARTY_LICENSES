@@ -1,0 +1,85 @@
+Third-Party Software Licenses
+==============================
+
+SkyTunnel orchestrates the following third-party tools as separate,
+independently-running binaries. SkyTunnel does not link to, embed, or
+create derivative works of these projects. Each tool is downloaded or
+compiled from source during server provisioning and executed as a
+standalone process managed by systemd.
+
+------------------------------------------------------------------------
+
+iodine - DNS Tunnel
+  Version:  0.8.0
+  Source:   https://github.com/yarrick/iodine
+  License:  ISC
+
+  Copyright (c) 2006-2023 Erik Ekman <yarrick@kryo.se>,
+                           Bjorn Andersson <bjorn@kryo.se>
+
+  Permission to use, copy, modify, and/or distribute this software for
+  any purpose with or without fee is hereby granted, provided that the
+  above copyright notice and this permission notice appear in all copies.
+
+  THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL
+  WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED
+  WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE
+  AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL
+  DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR
+  PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
+  TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
+  PERFORMANCE OF THIS SOFTWARE.
+
+------------------------------------------------------------------------
+
+hans - ICMP Tunnel
+  Version:  1.1
+  Source:   https://github.com/friedrich/hans
+  License:  GPL-3.0
+
+  Copyright (c) Friedrich Schöller
+
+  This program is free software: you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version.
+
+  This program is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+  NOTE: SkyTunnel invokes hans as a separate process and does not link
+  to or include hans source code. The GPL-3.0 license applies to the
+  hans binary itself, not to SkyTunnel.
+
+------------------------------------------------------------------------
+
+Chisel - HTTPS Tunnel
+  Version:  1.11.5
+  Source:   https://github.com/jpillora/chisel
+  License:  MIT
+
+  Copyright (c) 2023 Jaime Pillora
+
+  Permission is hereby granted, free of charge, to any person obtaining
+  a copy of this software and associated documentation files (the
+  "Software"), to deal in the Software without restriction, including
+  without limitation the rights to use, copy, modify, merge, publish,
+  distribute, sublicense, and/or sell copies of the Software, and to
+  permit persons to whom the Software is furnished to do so, subject to
+  the following conditions:
+
+  The above copyright notice and this permission notice shall be
+  included in all copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+  EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+  MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+  NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+  LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+  WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.

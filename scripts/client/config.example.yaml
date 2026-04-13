@@ -1,0 +1,29 @@
+# SkyTunnel client configuration
+# Copy to ~/.skytunnel/config.yaml and fill in your values.
+# All fields can be overridden by environment variables or CLI flags.
+
+# Server connection
+server_domain: example.com
+tunnel_subdomain: t
+ns_hostname: ns-tunnel
+
+# SSH key for DNS/ICMP tunnel modes (required — used to create SOCKS proxy over tunnel)
+# Env: SKYTUNNEL_SSH_KEY
+ssh_key: ~/.ssh/skytunnel.pem
+ssh_user: ec2-user
+
+# DNS tunnel (iodine)
+# Env: SKYTUNNEL_IODINE_PASSWORD
+iodine_password: ""
+
+# ICMP tunnel (hans)
+# Env: SKYTUNNEL_HANS_PASSWORD
+hans_password: ""
+
+# HTTPS tunnel (chisel) — no SSH key needed, chisel provides SOCKS directly
+# Env: SKYTUNNEL_CHISEL_AUTH
+chisel_auth: "user:password"
+chisel_port: 443
+
+# Local SOCKS5 proxy port (all tunnel modes expose this)
+socks_port: 1080

@@ -1,0 +1,58 @@
+[
+  {
+    "ParameterKey": "DomainName",
+    "ParameterValue": "example.com"
+  },
+  {
+    "ParameterKey": "TunnelSubdomain",
+    "ParameterValue": "t"
+  },
+  {
+    "ParameterKey": "NsHostname",
+    "ParameterValue": "ns-tunnel"
+  },
+  {
+    "ParameterKey": "HostedZoneId",
+    "ParameterValue": "Z0123456789ABCDEFGHIJ"
+  },
+  {
+    "ParameterKey": "InstanceType",
+    "ParameterValue": "t3.nano"
+  },
+  {
+    "ParameterKey": "KeyPairName",
+    "ParameterValue": "my-key-pair"
+  },
+  {
+    "ParameterKey": "SSHAllowCIDR",
+    "ParameterValue": "0.0.0.0/0"
+  },
+  {
+    "ParameterKey": "IodinePassword",
+    "ParameterValue": "CHANGE_ME_iodine"
+  },
+  {
+    "ParameterKey": "HansPassword",
+    "ParameterValue": "CHANGE_ME_hans"
+  },
+  {
+    "ParameterKey": "ChiselAuth",
+    "ParameterValue": "tunnel:CHANGE_ME_chisel"
+  },
+  {
+    "ParameterKey": "IodineSubnet",
+    "ParameterValue": "10.53.0.1/24"
+  },
+  {
+    "ParameterKey": "HansSubnet",
+    "ParameterValue": "10.54.0.1"
+  },
+  {
+    "ParameterKey": "EnableLetsEncrypt",
+    "ParameterValue": "false"
+  },
+  {
+    "ParameterKey": "LetsEncryptEmail",
+    "ParameterValue": ""
+  }
+]

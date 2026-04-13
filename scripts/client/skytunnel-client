@@ -1,0 +1,613 @@
+#!/usr/bin/env bash
+# SkyTunnel client — multi-protocol tunnel connector
+#
+# Usage: skytunnel-client <command> [options]
+#
+# Commands:
+#   connect dns|icmp|https|auto   Connect via specified tunnel protocol
+#   disconnect                    Disconnect active tunnel
+#   status                        Show tunnel status
+#
+# Config precedence: CLI flags > environment variables > config file
+
+set -euo pipefail
+
+VERSION="0.1.0"
+SKYTUNNEL_DIR="${HOME}/.skytunnel"
+PID_DIR="${SKYTUNNEL_DIR}/pids"
+CONFIG_FILE="${SKYTUNNEL_DIR}/config.yaml"
+DEFAULT_SOCKS_PORT=1080
+DEFAULT_CHISEL_PORT=443
+
+# --- Colors (disabled if not a terminal) ---
+if [[ -t 1 ]]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[0;33m'
+    BLUE='\033[0;34m'
+    BOLD='\033[1m'
+    NC='\033[0m'
+else
+    RED='' GREEN='' YELLOW='' BLUE='' BOLD='' NC=''
+fi
+
+# --- Helpers ---
+info()  { echo -e "${GREEN}[+]${NC} $*"; }
+warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
+error() { echo -e "${RED}[-]${NC} $*" >&2; }
+die()   { error "$@"; exit 1; }
+
+usage() {
+    cat <<EOF
+${BOLD}SkyTunnel Client v${VERSION}${NC}
+
+Usage: $(basename "$0") <command> [options]
+
+Commands:
+  connect dns       Connect via DNS tunnel (iodine) — requires root
+  connect icmp      Connect via ICMP tunnel (hans) — requires root
+  connect https     Connect via HTTPS tunnel (chisel)
+  connect auto      Auto-detect best tunnel (HTTPS > DNS > ICMP)
+  disconnect        Disconnect active tunnel
+  status            Show connection status
+
+Options:
+  -c, --config <path>   Config file (default: ~/.skytunnel/config.yaml)
+  -s, --server <host>   Server domain (overrides config)
+  -v, --verbose         Verbose output
+  -h, --help            Show this help
+
+Environment variables:
+  SKYTUNNEL_SERVER_DOMAIN     Server domain
+  SKYTUNNEL_TUNNEL_SUBDOMAIN  Tunnel subdomain (default: t)
+  SKYTUNNEL_NS_HOSTNAME       NS hostname (default: ns-tunnel)
+  SKYTUNNEL_IODINE_PASSWORD   iodine password
+  SKYTUNNEL_HANS_PASSWORD     hans password
+  SKYTUNNEL_CHISEL_AUTH       chisel auth (user:password)
+  SKYTUNNEL_CHISEL_PORT       chisel port (default: 443)
+  SKYTUNNEL_SOCKS_PORT        local SOCKS5 port (default: 1080)
+EOF
+    exit 0
+}
+
+# --- Config parsing (simple YAML via grep/sed) ---
+config_get() {
+    local key="$1"
+    local default="${2:-}"
+    if [[ -f "$CONFIG_FILE" ]]; then
+        local val
+        val=$(grep -E "^${key}:" "$CONFIG_FILE" 2>/dev/null | head -1 | sed 's/^[^:]*:[[:space:]]*//' | sed 's/[[:space:]]*$//' | sed 's/^["'"'"']//' | sed 's/["'"'"']$//')
+        if [[ -n "$val" ]]; then
+            echo "$val"
+            return
+        fi
+    fi
+    echo "$default"
+}
+
+# --- Load configuration (CLI > env > config file) ---
+load_config() {
+    SERVER_DOMAIN="${OPT_SERVER:-${SKYTUNNEL_SERVER_DOMAIN:-$(config_get server_domain "")}}"
+    TUNNEL_SUBDOMAIN="${SKYTUNNEL_TUNNEL_SUBDOMAIN:-$(config_get tunnel_subdomain "t")}"
+    NS_HOSTNAME="${SKYTUNNEL_NS_HOSTNAME:-$(config_get ns_hostname "ns-tunnel")}"
+    IODINE_PASSWORD="${SKYTUNNEL_IODINE_PASSWORD:-$(config_get iodine_password "")}"
+    HANS_PASSWORD="${SKYTUNNEL_HANS_PASSWORD:-$(config_get hans_password "")}"
+    CHISEL_AUTH="${SKYTUNNEL_CHISEL_AUTH:-$(config_get chisel_auth "")}"
+    CHISEL_PORT="${SKYTUNNEL_CHISEL_PORT:-$(config_get chisel_port "$DEFAULT_CHISEL_PORT")}"
+    SOCKS_PORT="${SKYTUNNEL_SOCKS_PORT:-$(config_get socks_port "$DEFAULT_SOCKS_PORT")}"
+    SSH_KEY="${SKYTUNNEL_SSH_KEY:-$(config_get ssh_key "")}"
+    SSH_USER="${SKYTUNNEL_SSH_USER:-$(config_get ssh_user "ec2-user")}"
+    IODINE_SUBNET="${SKYTUNNEL_IODINE_SUBNET:-$(config_get iodine_subnet "10.53.0.1/24")}"
+    HANS_SUBNET="${SKYTUNNEL_HANS_SUBNET:-$(config_get hans_subnet "10.54.0.1")}"
+
+    # Expand ~ in SSH_KEY path
+    SSH_KEY="${SSH_KEY/#\~/$HOME}"
+
+    # Derived values
+    TUNNEL_DOMAIN="${TUNNEL_SUBDOMAIN}.${SERVER_DOMAIN}"
+    NS_FQDN="${NS_HOSTNAME}.${SERVER_DOMAIN}"
+}
+
+validate_config() {
+    [[ -z "$SERVER_DOMAIN" ]] && die "Server domain not set. Use -s, SKYTUNNEL_SERVER_DOMAIN, or config file."
+}
+
+# --- Dependency checks ---
+check_cmd() {
+    command -v "$1" &>/dev/null
+}
+
+# Extend PATH to include Homebrew sbin (macOS installs iodine there)
+if [[ "$(uname -s)" == "Darwin" ]] && command -v brew &>/dev/null; then
+    BREW_SBIN="$(brew --prefix)/sbin"
+    [[ -d "$BREW_SBIN" ]] && export PATH="$BREW_SBIN:$PATH"
+fi
+
+require_cmd() {
+    local cmd="$1"
+    local pkg="${2:-$1}"
+    if ! check_cmd "$cmd"; then
+        die "'${cmd}' not found. Install it or run: scripts/client/install-deps.sh"
+    fi
+}
+
+require_root() {
+    if [[ $EUID -ne 0 ]]; then
+        die "This tunnel requires root. Re-run with: sudo $(basename "$0") $*"
+    fi
+}
+
+# --- PID management ---
+mkdir -p "$PID_DIR" 2>/dev/null || true
+
+save_pid() {
+    local proto="$1" pid="$2"
+    echo "$pid" > "${PID_DIR}/${proto}.pid"
+}
+
+get_pid() {
+    local proto="$1"
+    local pidfile="${PID_DIR}/${proto}.pid"
+    if [[ -f "$pidfile" ]]; then
+        local pid
+        pid=$(cat "$pidfile")
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "$pid"
+            return 0
+        fi
+        rm -f "$pidfile"
+    fi
+    return 1
+}
+
+get_active_proto() {
+    for proto in https dns icmp; do
+        if get_pid "$proto" &>/dev/null; then
+            echo "$proto"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# --- OS detection ---
+detect_os() {
+    case "$(uname -s)" in
+        Darwin) OS="macos" ;;
+        Linux)  OS="linux" ;;
+        *)      OS="unknown" ;;
+    esac
+}
+
+# --- Wait for tunnel device ---
+wait_for_tun() {
+    local device="$1"
+    local timeout="${2:-10}"
+    local elapsed=0
+
+    while (( elapsed < timeout )); do
+        # macOS: utun devices appear in ifconfig; match prefix for utunN
+        # Linux: check exact device name via ip or ifconfig
+        if [[ "$device" == "utun" ]]; then
+            # Match any utun device (utun0, utun1, ...)
+            if ifconfig 2>/dev/null | grep -q "^utun"; then
+                return 0
+            fi
+        else
+            if ifconfig "$device" &>/dev/null 2>&1 || ip link show "$device" &>/dev/null 2>&1; then
+                return 0
+            fi
+        fi
+        sleep 1
+        ((elapsed++))
+    done
+    return 1
+}
+
+# --- Wait for SOCKS proxy ---
+wait_for_socks() {
+    local port="$1"
+    local timeout="${2:-5}"
+    local elapsed=0
+
+    while (( elapsed < timeout )); do
+        if (echo "" | nc -z 127.0.0.1 "$port") &>/dev/null; then
+            return 0
+        fi
+        sleep 1
+        ((elapsed++))
+    done
+    return 1
+}
+
+# --- Resolve server IP (needed for hans which takes an IP, not domain) ---
+resolve_ip() {
+    local domain="$1"
+    if check_cmd dig; then
+        dig +short "$domain" A | head -1
+    elif check_cmd nslookup; then
+        nslookup "$domain" 2>/dev/null | awk '/^Address:/ && NR>2 {print $2}' | head -1
+    elif check_cmd host; then
+        host "$domain" 2>/dev/null | awk '/has address/ {print $4}' | head -1
+    else
+        getent hosts "$domain" 2>/dev/null | awk '{print $1}' | head -1
+    fi
+}
+
+# ============================================================
+# Connect functions
+# ============================================================
+
+connect_https() {
+    require_cmd chisel
+    validate_config
+    [[ -z "$CHISEL_AUTH" ]] && die "Chisel auth not set (SKYTUNNEL_CHISEL_AUTH or config)"
+
+    if get_pid https &>/dev/null; then
+        warn "HTTPS tunnel already connected (PID $(get_pid https))"
+        return 0
+    fi
+
+    info "Connecting via HTTPS tunnel (chisel)..."
+    info "Server: ${TUNNEL_DOMAIN}:${CHISEL_PORT}"
+
+    chisel client \
+        --auth "$CHISEL_AUTH" \
+        "https://${TUNNEL_DOMAIN}:${CHISEL_PORT}" \
+        "socks" &
+    local pid=$!
+    save_pid https "$pid"
+
+    if wait_for_socks "$SOCKS_PORT" 5; then
+        info "Connected!"
+        echo ""
+        echo -e "  ${BOLD}Tunnel:${NC}      HTTPS (chisel)"
+        echo -e "  ${BOLD}SOCKS proxy:${NC} localhost:${SOCKS_PORT}"
+        echo -e "  ${BOLD}Throughput:${NC}  ${GREEN}High${NC} (10-50+ Mbps)"
+        echo ""
+        echo -e "  Test: curl --socks5 localhost:${SOCKS_PORT} https://ifconfig.me"
+    else
+        kill "$pid" 2>/dev/null || true
+        rm -f "${PID_DIR}/https.pid"
+        die "Failed to establish HTTPS tunnel (timeout)"
+    fi
+}
+
+# --- Start SSH SOCKS proxy over a tunnel ---
+# Usage: start_ssh_socks <tunnel_ip> <proto_name>
+start_ssh_socks() {
+    local tunnel_ip="$1"
+    local proto="$2"
+
+    # Validate SSH key
+    if [[ -z "$SSH_KEY" ]]; then
+        die "SSH key not configured. Set ssh_key in ~/.skytunnel/config.yaml or SKYTUNNEL_SSH_KEY"
+    fi
+    if [[ ! -f "$SSH_KEY" ]]; then
+        die "SSH key not found: $SSH_KEY"
+    fi
+
+    info "Starting SOCKS proxy via SSH ($SSH_USER@$tunnel_ip)..."
+
+    local ssh_log
+    ssh_log=$(mktemp)
+    ssh -f -N -D "127.0.0.1:${SOCKS_PORT}" \
+        -i "$SSH_KEY" \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o ConnectTimeout=10 \
+        "${SSH_USER}@${tunnel_ip}" 2>"$ssh_log"
+
+    local ssh_exit=$?
+    if [[ $ssh_exit -ne 0 ]]; then
+        error "SSH SOCKS proxy failed (exit $ssh_exit):"
+        cat "$ssh_log" >&2
+        rm -f "$ssh_log"
+        die "Could not establish SSH SOCKS proxy to $tunnel_ip. Check your ssh_key config."
+    fi
+    rm -f "$ssh_log"
+
+    # Save SSH PID
+    local ssh_pid
+    ssh_pid=$(pgrep -f "ssh.*-D.*${SOCKS_PORT}.*${tunnel_ip}" | head -1)
+    [[ -n "$ssh_pid" ]] && save_pid "${proto}_socks" "$ssh_pid"
+
+    # Verify SOCKS proxy is responding
+    if wait_for_socks "$SOCKS_PORT" 5; then
+        return 0
+    else
+        warn "SSH started but SOCKS proxy not responding on port ${SOCKS_PORT}"
+        return 1
+    fi
+}
+
+connect_dns() {
+    require_cmd iodine
+    require_root connect dns
+    validate_config
+    [[ -z "$IODINE_PASSWORD" ]] && die "Iodine password not set (SKYTUNNEL_IODINE_PASSWORD or config)"
+
+    if get_pid dns &>/dev/null; then
+        warn "DNS tunnel already connected (PID $(get_pid dns))"
+        return 0
+    fi
+
+    info "Connecting via DNS tunnel (iodine)..."
+    info "Domain: ${TUNNEL_DOMAIN}"
+
+    iodine -f -P "$IODINE_PASSWORD" "$NS_FQDN" "$TUNNEL_DOMAIN" &
+    local pid=$!
+    save_pid dns "$pid"
+
+    # Wait for tun device — iodine creates utunN on macOS, dns0 on Linux
+    # iodine negotiation (version, login, codec, fragment size) can take 20-30s
+    local tun_device="utun"
+    [[ "$OS" == "linux" ]] && tun_device="dns0"
+
+    info "Waiting for tunnel device (iodine negotiation may take 20-30s)..."
+    if wait_for_tun "$tun_device" 45; then
+        # Server tunnel IP is always .1 of the configured subnet
+        local tunnel_ip
+        tunnel_ip=$(echo "${IODINE_SUBNET:-10.53.0.1/24}" | cut -d/ -f1 | sed 's/\.[0-9]*$/.1/')
+
+        if start_ssh_socks "$tunnel_ip" "dns"; then
+            info "Connected!"
+            echo ""
+            echo -e "  ${BOLD}Tunnel:${NC}      DNS (iodine)"
+            echo -e "  ${BOLD}Tunnel IP:${NC}   ${tunnel_ip} (server) via ${tun_device} device"
+            echo -e "  ${BOLD}SOCKS proxy:${NC} localhost:${SOCKS_PORT}"
+            echo -e "  ${BOLD}Throughput:${NC}  ${YELLOW}Low${NC} (50-100 KB/s)"
+            echo ""
+            echo -e "  Test: curl --socks5 localhost:${SOCKS_PORT} https://ifconfig.me"
+        fi
+    else
+        kill "$pid" 2>/dev/null || true
+        rm -f "${PID_DIR}/dns.pid"
+        die "Failed to establish DNS tunnel (timeout — check DNS delegation for ${TUNNEL_DOMAIN})"
+    fi
+}
+
+connect_icmp() {
+    require_cmd hans
+    require_root connect icmp
+    validate_config
+    [[ -z "$HANS_PASSWORD" ]] && die "Hans password not set (SKYTUNNEL_HANS_PASSWORD or config)"
+
+    if get_pid icmp &>/dev/null; then
+        warn "ICMP tunnel already connected (PID $(get_pid icmp))"
+        return 0
+    fi
+
+    # hans needs an IP address, not a domain
+    local server_ip
+    server_ip=$(resolve_ip "$NS_FQDN")
+    [[ -z "$server_ip" ]] && server_ip=$(resolve_ip "${SERVER_DOMAIN}")
+    [[ -z "$server_ip" ]] && die "Could not resolve server IP for ${SERVER_DOMAIN}"
+
+    info "Connecting via ICMP tunnel (hans)..."
+    info "Server: ${server_ip}"
+
+    hans -c "$server_ip" -p "$HANS_PASSWORD" -f &
+    local pid=$!
+    save_pid icmp "$pid"
+
+    # Wait for tun device — hans creates utunN on macOS, hans0 on Linux
+    local tun_device="utun"
+    [[ "$OS" == "linux" ]] && tun_device="hans0"
+
+    info "Waiting for tunnel device..."
+    if wait_for_tun "$tun_device" 15; then
+        # Server tunnel IP is always .1 of the configured subnet
+        local tunnel_ip
+        tunnel_ip=$(echo "${HANS_SUBNET:-10.54.0.1}" | sed 's/\.[0-9]*$/.1/')
+
+        if start_ssh_socks "$tunnel_ip" "icmp"; then
+            info "Connected!"
+            echo ""
+            echo -e "  ${BOLD}Tunnel:${NC}      ICMP (hans)"
+            echo -e "  ${BOLD}Tunnel IP:${NC}   ${tunnel_ip} (server) via ${tun_device} device"
+            echo -e "  ${BOLD}SOCKS proxy:${NC} localhost:${SOCKS_PORT}"
+            echo -e "  ${BOLD}Throughput:${NC}  ${YELLOW}Medium${NC} (100-300 KB/s)"
+            echo ""
+            echo -e "  Test: curl --socks5 localhost:${SOCKS_PORT} https://ifconfig.me"
+        fi
+    else
+        kill "$pid" 2>/dev/null || true
+        rm -f "${PID_DIR}/icmp.pid"
+        die "Failed to establish ICMP tunnel (timeout — network may block ICMP)"
+    fi
+}
+
+connect_auto() {
+    validate_config
+    info "Auto-detecting best tunnel..."
+    echo ""
+
+    # Try HTTPS first (best throughput, no root needed)
+    if check_cmd chisel && [[ -n "$CHISEL_AUTH" ]]; then
+        info "Trying HTTPS tunnel (chisel)..."
+        if connect_https 2>/dev/null; then
+            return 0
+        fi
+        warn "HTTPS tunnel failed, trying next..."
+        cleanup_proto https
+    fi
+
+    # Try DNS tunnel
+    if check_cmd iodine && [[ -n "$IODINE_PASSWORD" ]] && [[ $EUID -eq 0 ]]; then
+        info "Trying DNS tunnel (iodine)..."
+        if connect_dns 2>/dev/null; then
+            return 0
+        fi
+        warn "DNS tunnel failed, trying next..."
+        cleanup_proto dns
+    fi
+
+    # Try ICMP tunnel
+    if check_cmd hans && [[ -n "$HANS_PASSWORD" ]] && [[ $EUID -eq 0 ]]; then
+        info "Trying ICMP tunnel (hans)..."
+        if connect_icmp 2>/dev/null; then
+            return 0
+        fi
+        warn "ICMP tunnel failed"
+        cleanup_proto icmp
+    fi
+
+    echo ""
+    die "All tunnel methods failed. Diagnostics:
+  - HTTPS: Is port ${CHISEL_PORT} reachable? Is chisel installed?
+  - DNS:   Is ${TUNNEL_DOMAIN} delegated? Is iodine installed? Running as root?
+  - ICMP:  Is ICMP allowed by the network? Is hans installed? Running as root?"
+}
+
+# ============================================================
+# Disconnect
+# ============================================================
+
+cleanup_proto() {
+    local proto="$1"
+    local pid
+    if pid=$(get_pid "$proto" 2>/dev/null); then
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+    fi
+    rm -f "${PID_DIR}/${proto}.pid"
+
+    # Also clean up associated SSH SOCKS proxy
+    if pid=$(get_pid "${proto}_socks" 2>/dev/null); then
+        kill "$pid" 2>/dev/null || true
+    fi
+    rm -f "${PID_DIR}/${proto}_socks.pid"
+}
+
+do_disconnect() {
+    local found=false
+
+    for proto in https dns icmp; do
+        if get_pid "$proto" &>/dev/null; then
+            info "Disconnecting ${proto} tunnel (PID $(get_pid "$proto"))..."
+            cleanup_proto "$proto"
+            found=true
+        fi
+    done
+
+    # Clean up any lingering SSH SOCKS proxies
+    pkill -f "ssh.*-D.*127.0.0.1:${SOCKS_PORT}" 2>/dev/null || true
+
+    if $found; then
+        info "Disconnected"
+    else
+        warn "No active tunnel found"
+    fi
+}
+
+# ============================================================
+# Status
+# ============================================================
+
+do_status() {
+    local active_proto
+    if active_proto=$(get_active_proto); then
+        local pid
+        pid=$(get_pid "$active_proto")
+        local uptime_info=""
+
+        # Try to get process start time
+        local start_time
+        start_time=$(ps -o lstart= -p "$pid" 2>/dev/null || true)
+        [[ -n "$start_time" ]] && uptime_info=" (since ${start_time})"
+
+        local throughput_class
+        case "$active_proto" in
+            https) throughput_class="${GREEN}High${NC} (10-50+ Mbps)" ;;
+            dns)   throughput_class="${YELLOW}Low${NC} (50-100 KB/s)" ;;
+            icmp)  throughput_class="${YELLOW}Medium${NC} (100-300 KB/s)" ;;
+        esac
+
+        echo -e "${BOLD}SkyTunnel Status${NC}"
+        echo ""
+        echo -e "  ${BOLD}State:${NC}       ${GREEN}Connected${NC}"
+        echo -e "  ${BOLD}Tunnel:${NC}      ${active_proto}${uptime_info}"
+        echo -e "  ${BOLD}PID:${NC}         ${pid}"
+        echo -e "  ${BOLD}SOCKS proxy:${NC} localhost:${SOCKS_PORT}"
+        echo -e "  ${BOLD}Throughput:${NC}  ${throughput_class}"
+
+        # Check if SOCKS proxy is actually responding
+        if (echo "" | nc -z 127.0.0.1 "$SOCKS_PORT") &>/dev/null; then
+            echo -e "  ${BOLD}SOCKS test:${NC}  ${GREEN}responding${NC}"
+        else
+            echo -e "  ${BOLD}SOCKS test:${NC}  ${RED}not responding${NC}"
+        fi
+    else
+        echo -e "${BOLD}SkyTunnel Status${NC}"
+        echo ""
+        echo -e "  ${BOLD}State:${NC}       ${RED}Disconnected${NC}"
+    fi
+}
+
+# ============================================================
+# Signal handling
+# ============================================================
+
+cleanup_on_exit() {
+    do_disconnect 2>/dev/null || true
+}
+
+# ============================================================
+# Main
+# ============================================================
+
+detect_os
+
+# Parse global options
+OPT_SERVER=""
+VERBOSE=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help)    usage ;;
+        -v|--verbose) VERBOSE=true; shift ;;
+        -c|--config)  CONFIG_FILE="$2"; shift 2 ;;
+        -s|--server)  OPT_SERVER="$2"; shift 2 ;;
+        -*)           die "Unknown option: $1 (try --help)" ;;
+        *)            break ;;
+    esac
+done
+
+COMMAND="${1:-}"
+shift || true
+
+load_config
+
+case "$COMMAND" in
+    connect)
+        PROTOCOL="${1:-}"
+        [[ -z "$PROTOCOL" ]] && die "Usage: $(basename "$0") connect <dns|icmp|https|auto>"
+
+        # Set up signal handling for graceful disconnect
+        trap cleanup_on_exit SIGINT SIGTERM
+
+        case "$PROTOCOL" in
+            dns)   connect_dns ;;
+            icmp)  connect_icmp ;;
+            https) connect_https ;;
+            auto)  connect_auto ;;
+            *)     die "Unknown protocol: $PROTOCOL (use dns, icmp, https, or auto)" ;;
+        esac
+        ;;
+    disconnect)
+        do_disconnect
+        ;;
+    status)
+        do_status
+        ;;
+    version)
+        echo "skytunnel-client v${VERSION}"
+        ;;
+    "")
+        usage
+        ;;
+    *)
+        die "Unknown command: $COMMAND (try --help)"
+        ;;
+esac

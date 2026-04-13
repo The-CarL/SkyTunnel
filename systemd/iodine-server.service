@@ -1,0 +1,17 @@
+[Unit]
+Description=iodine DNS tunnel server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/skytunnel/iodine.env
+ExecStartPre=/sbin/modprobe tun
+ExecStart=/usr/local/sbin/iodined -f -c -P $IODINE_PASSWORD $IODINE_SUBNET $IODINE_DOMAIN
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+ProtectProc=invisible
+
+[Install]
+WantedBy=multi-user.target

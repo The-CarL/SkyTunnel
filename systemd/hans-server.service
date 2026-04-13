@@ -1,0 +1,16 @@
+[Unit]
+Description=hans ICMP tunnel server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/skytunnel/hans.env
+ExecStartPre=/sbin/modprobe tun
+ExecStart=/usr/local/sbin/hans -s $HANS_SUBNET -p $HANS_PASSWORD -f -d hans0
+Restart=on-failure
+RestartSec=5
+ProtectProc=invisible
+
+[Install]
+WantedBy=multi-user.target
