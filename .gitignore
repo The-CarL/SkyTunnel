@@ -1,0 +1,3 @@
+# Personal parameter files (contain secrets)
+cloudformation/params/skytunnel-*.json
+!cloudformation/params/example.json
