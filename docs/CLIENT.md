@@ -121,6 +121,18 @@ sudo skytunnel-client connect auto
 skytunnel-client status
 ```
 
+### Speed Test
+
+Run a speed test through the active tunnel:
+
+```bash
+skytunnel-client speedtest           # default 1MB test
+skytunnel-client speedtest 100000    # 100KB (good for dns/icmp)
+skytunnel-client speedtest 10000000  # 10MB (good for https)
+```
+
+Reports download speed, upload speed, and latency.
+
 ### Disconnect
 
 ```bash

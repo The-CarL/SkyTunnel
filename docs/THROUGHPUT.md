@@ -70,35 +70,29 @@ hans encodes data in ICMP echo request/reply packets. Each packet carries more p
 
 ## Running Your Own Benchmarks
 
-### Quick Speed Test
+### Built-in Speed Test
 
-After connecting via any tunnel:
+The client has a built-in speed test that measures download, upload, and latency through the active tunnel:
 
 ```bash
-# Download speed (via SOCKS proxy)
-curl --socks5 localhost:1080 -o /dev/null -w "Speed: %{speed_download} bytes/sec\n" \
-  https://speed.cloudflare.com/__down?bytes=10000000
-
-# Upload speed
-dd if=/dev/zero bs=1M count=5 2>/dev/null | \
-  curl --socks5 localhost:1080 -X POST -d @- -o /dev/null -w "Speed: %{speed_upload} bytes/sec\n" \
-  https://speed.cloudflare.com/__up
+# Connect a tunnel first, then:
+skytunnel-client speedtest             # 1MB test (default)
+skytunnel-client speedtest 100000      # 100KB — better for dns/icmp tunnels
+skytunnel-client speedtest 10000000    # 10MB — better for https tunnel
 ```
 
-### Sustained Throughput Test
+### Manual Speed Test (curl)
 
 ```bash
-# Use iperf3 through the tunnel
-# On server: iperf3 -s
-# On client:
-iperf3 -c <tunnel-server-ip> --socks5 localhost:1080
-```
+# Download (1MB through SOCKS proxy)
+curl --socks5 localhost:1080 -o /dev/null -s \
+  -w "Speed: %{speed_download} bytes/sec\nTime: %{time_total}s\n" \
+  'https://speed.cloudflare.com/__down?bytes=1000000'
 
-### Latency Test
-
-```bash
-# Measure round-trip time through the tunnel
-time curl --socks5 localhost:1080 -o /dev/null -s https://ifconfig.me
+# Latency (tiny request, measures round-trip)
+curl --socks5 localhost:1080 -o /dev/null -s \
+  -w "Latency: %{time_total}s\n" \
+  'https://speed.cloudflare.com/__down?bytes=1'
 ```
 
 ## Throughput by Scenario
